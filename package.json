@@ -1,0 +1,23 @@
+{
+  "name": "node-interceptor",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/IlyasMakari/node-interceptor#readme",
+  "bugs": {
+    "url": "https://github.com/IlyasMakari/node-interceptor/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IlyasMakari/node-interceptor.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "interceptor.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "axios": "^1.13.2"
+  }
+}
