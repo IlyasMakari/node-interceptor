@@ -6,83 +6,124 @@ module.exports = function setupInterceptors(logger = console.log) {
   const http = require('http');
   const https = require('https');
 
-  function logPair(requestInfo, responseInfo) {
-    logger(requestInfo, responseInfo);
-  }
+  const STATE = { disabled: false };
 
-  function attachResponseLogger(req, requestInfo) {
-    req.on('response', (res) => {
-      let responseData = '';
-      res.on('data', (chunk) => (responseData += chunk.toString()));
-      res.on('end', () => {
-        const responseInfo = {
-          statusCode: res.statusCode,
-          headers: res.headers,
-          body: responseData,
-        };
-        logPair(requestInfo, responseInfo);
-      });
-    });
-  }
-
-  function wrapRequest(req, requestInfo) {
-    requestInfo.body = '';
-
-    const originalWrite = req.write;
-    req.write = function (chunk, ...rest) {
-      if (chunk) requestInfo.body += chunk.toString();
-      return originalWrite.call(req, chunk, ...rest);
-    };
-
-    const originalEnd = req.end;
-    req.end = function (chunk, ...rest) {
-      if (chunk) requestInfo.body += chunk.toString();
-      return originalEnd.call(req, chunk, ...rest);
-    };
-
-    attachResponseLogger(req, requestInfo);
-    return req;
+  function safeLog(req, res) {
+    const prev = STATE.disabled;
+    STATE.disabled = true;
+    try {
+      logger(req, res);
+    } finally {
+      STATE.disabled = prev;
+    }
   }
 
   // ------------------------ HTTP ------------------------
-  const originalHttpRequest = http.request;
+  const ohreq = http.request;
   http.request = function (...args) {
-    const options = typeof args[0] === 'string' ? { url: args[0] } : args[0];
-    const requestInfo = { transport: 'http', options, method: options.method || 'GET', headers: options.headers || {} };
-    const req = originalHttpRequest.apply(http, args);
-    return wrapRequest(req, requestInfo);
+    if (STATE.disabled) return ohreq.apply(http, args);
+
+    const opts = typeof args[0] === 'string' ? { url: args[0] } : args[0];
+    const reqInfo = {
+      transport: 'http',
+      options: opts,
+      method: opts.method || 'GET',
+      headers: opts.headers || {},
+      body: '',
+    };
+
+    const req = ohreq.apply(http, args);
+
+    const ow = req.write;
+    req.write = function (chunk, ...r) {
+      if (chunk) reqInfo.body += chunk.toString();
+      return ow.call(req, chunk, ...r);
+    };
+
+    const oe = req.end;
+    req.end = function (chunk, ...r) {
+      if (chunk) reqInfo.body += chunk.toString();
+      return oe.call(req, chunk, ...r);
+    };
+
+    req.on('response', (res) => {
+      let body = '';
+      res.on('data', (c) => (body += c.toString()));
+      res.on('end', () => {
+        safeLog(reqInfo, {
+          statusCode: res.statusCode,
+          headers: res.headers,
+          body,
+        });
+      });
+    });
+
+    return req;
   };
 
-  const originalHttpGet = http.get;
   http.get = function (...args) {
-    const options = typeof args[0] === 'string' ? { url: args[0] } : args[0];
-    const requestInfo = { transport: 'http', options, method: 'GET', headers: options.headers || {} };
-    const req = originalHttpGet.apply(http, args);
-    return wrapRequest(req, requestInfo);
+    if (STATE.disabled) return http.request(...args).end();
+    return http.request(...args);
   };
 
   // ------------------------ HTTPS ------------------------
-  const originalHttpsRequest = https.request;
+  const ohsreq = https.request;
   https.request = function (...args) {
-    const options = typeof args[0] === 'string' ? { url: args[0] } : args[0];
-    const requestInfo = { transport: 'https', options, method: options.method || 'GET', headers: options.headers || {} };
-    const req = originalHttpsRequest.apply(https, args);
-    return wrapRequest(req, requestInfo);
+    if (STATE.disabled) return ohsreq.apply(https, args);
+
+    const opts = typeof args[0] === 'string' ? { url: args[0] } : args[0];
+    const reqInfo = {
+      transport: 'https',
+      options: opts,
+      method: opts.method || 'GET',
+      headers: opts.headers || {},
+      body: '',
+    };
+
+    const req = ohsreq.apply(https, args);
+
+    const ow = req.write;
+    req.write = function (chunk, ...r) {
+      if (chunk) reqInfo.body += chunk.toString();
+      return ow.call(req, chunk, ...r);
+    };
+
+    const oe = req.end;
+    req.end = function (chunk, ...r) {
+      if (chunk) reqInfo.body += chunk.toString();
+      return oe.call(req, chunk, ...r);
+    };
+
+    req.on('response', (res) => {
+      let body = '';
+      res.on('data', (c) => (body += c.toString()));
+      res.on('end', () => {
+        safeLog(reqInfo, {
+          statusCode: res.statusCode,
+          headers: res.headers,
+          body,
+        });
+      });
+    });
+
+    return req;
   };
 
-  const originalHttpsGet = https.get;
   https.get = function (...args) {
-    const options = typeof args[0] === 'string' ? { url: args[0] } : args[0];
-    const requestInfo = { transport: 'https', options, method: 'GET', headers: options.headers || {} };
-    const req = originalHttpsGet.apply(https, args);
-    return wrapRequest(req, requestInfo);
+    if (STATE.disabled) return https.request(...args).end();
+    return https.request(...args);
   };
 
   // ------------------------ FETCH ------------------------
   if (typeof global.fetch === 'function') {
     const originalFetch = global.fetch;
+
     global.fetch = async function (url, opts = {}) {
-      const requestInfo = {
+      if (STATE.disabled) {
+        return originalFetch(url, opts);
+      }
+
+      const reqInfo = {
         transport: 'fetch',
         url,
         method: opts.method || 'GET',
@@ -91,17 +132,15 @@ module.exports = function setupInterceptors(logger = console.log) {
       };
 
       const res = await originalFetch(url, opts);
+      const clone = res.clone();
+      const body = await clone.text();
 
-      const cloned = res.clone();
-      let body = await cloned.text();
-
-      const responseInfo = {
+      safeLog(reqInfo, {
         statusCode: res.status,
         headers: Object.fromEntries(res.headers.entries()),
         body,
-      };
+      });
 
-      logPair(requestInfo, responseInfo);
       return res;
     };
   }
@@ -109,26 +148,28 @@ module.exports = function setupInterceptors(logger = console.log) {
   // ------------------------ AXIOS ------------------------
   try {
     const axios = require('axios');
+
     axios.interceptors.request.use((config) => {
-      config.__requestInfo = {
+      if (STATE.disabled) return config;
+      config.__reqInfo = {
         transport: 'axios',
         url: config.url,
-        method: config.method || 'get',
-        headers: config.headers || {},
-        body: config.data || '',
+        method: config.method,
+        headers: config.headers,
+        body: config.data,
       };
       return config;
     });
 
-    axios.interceptors.response.use((response) => {
-      const requestInfo = response.config.__requestInfo;
-      const responseInfo = {
-        statusCode: response.status,
-        headers: response.headers,
-        body: response.data,
-      };
-      logPair(requestInfo, responseInfo);
-      return response;
+    axios.interceptors.response.use((res) => {
+      if (!STATE.disabled && res.config.__reqInfo) {
+        safeLog(res.config.__reqInfo, {
+          statusCode: res.status,
+          headers: res.headers,
+          body: res.data,
+        });
+      }
+      return res;
     });
   } catch {}
 };

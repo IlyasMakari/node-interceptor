@@ -3,89 +3,89 @@
 // logger(type, input)
 
 module.exports = function setupCodeInterceptor(logger = console.log) {
-    // ---------------------- eval ----------------------
-    const originalEval = global.eval;
-    global.eval = function (input) {
-        logger('eval', input);
-        return originalEval(input);
-    };
+  const STATE = { disabled: false };
 
-    // ---------------------- Function constructor ----------------------
-    const OriginalFunction = Function;
-    function InterceptedFunction(...args) {
-        const body = args[args.length - 1];
-        logger('Function', body);
-        return OriginalFunction.apply(this, args);
+  function safeLog(type, input) {
+    const prev = STATE.disabled;
+    STATE.disabled = true;
+    try {
+      logger(type, input);
+    } finally {
+      STATE.disabled = prev;
     }
-    global.Function = InterceptedFunction;
-    // Ensure all existing functions, including Number, String, etc.,
-    // see the intercepted constructor via .constructor
-    InterceptedFunction.prototype = OriginalFunction.prototype;
-    OriginalFunction.prototype.constructor = InterceptedFunction;
+  }
 
-    // ---------------------- setTimeout / setInterval ----------------------
-    const originalSetTimeout = global.setTimeout;
-    global.setTimeout = function (fn, delay, ...rest) {
-        if (typeof fn === 'string') logger('setTimeout', fn);
-        return originalSetTimeout(fn, delay, ...rest);
+  // ---------------------- eval ----------------------
+  const oeval = global.eval;
+  global.eval = function (input) {
+    if (!STATE.disabled) safeLog('eval', input);
+    return oeval(input);
+  };
+
+  // ---------------------- Function ----------------------
+  const OFunction = global.Function;
+  function InterceptedFunction(...args) {
+    if (!STATE.disabled) safeLog('Function', args[args.length - 1]);
+    return OFunction.apply(this, args);
+  }
+  InterceptedFunction.prototype = OFunction.prototype;
+  OFunction.prototype.constructor = InterceptedFunction;
+  global.Function = InterceptedFunction;
+
+  // ---------------------- Timers ----------------------
+  const oST = global.setTimeout;
+  global.setTimeout = function (fn, delay, ...r) {
+    if (!STATE.disabled && typeof fn === 'string') safeLog('setTimeout', fn);
+    return oST(fn, delay, ...r);
+  };
+
+  const oSI = global.setInterval;
+  global.setInterval = function (fn, delay, ...r) {
+    if (!STATE.disabled && typeof fn === 'string') safeLog('setInterval', fn);
+    return oSI(fn, delay, ...r);
+  };
+
+  // ---------------------- vm ----------------------
+  try {
+    const vm = require('vm');
+
+    const o1 = vm.runInThisContext;
+    vm.runInThisContext = function (code, ...r) {
+      if (!STATE.disabled) safeLog('vm.runInThisContext', code);
+      return o1.call(vm, code, ...r);
     };
 
-    const originalSetInterval = global.setInterval;
-    global.setInterval = function (fn, delay, ...rest) {
-        if (typeof fn === 'string') logger('setInterval', fn);
-        return originalSetInterval(fn, delay, ...rest);
+    const OS = vm.Script;
+    vm.Script = function (code, ...r) {
+      if (!STATE.disabled) safeLog('vm.Script', code);
+      return new OS(code, ...r);
     };
+    vm.Script.prototype = OS.prototype;
 
-    // ---------------------- vm methods ----------------------
-    try {
-        const vm = require('vm');
-
-        const originalRunInThisContext = vm.runInThisContext;
-        vm.runInThisContext = function (code, ...rest) {
-            logger('vm.runInThisContext', code);
-            return originalRunInThisContext.call(vm, code, ...rest);
-        };
-
-        const OriginalScript = vm.Script;
-        vm.Script = function (code, ...rest) {
-            logger('vm.Script', code);
-            return new OriginalScript(code, ...rest);
-        };
-        vm.Script.prototype = OriginalScript.prototype;
-
-        const originalRunInNewContext = vm.runInNewContext;
-        vm.runInNewContext = function (code, ...rest) {
-            logger('vm.runInNewContext', code);
-            return originalRunInNewContext.call(vm, code, ...rest);
-        };
-    } catch { }
-
-    // ---------------------- child_process ----------------------
-    try {
-        const cp = require('child_process');
-
-        const wrap = (name) => {
-            const original = cp[name];
-            if (!original) return;
-            cp[name] = function (...args) {
-                logger(`child_process.${name}`, args[0]);
-                return original.apply(cp, args);
-            };
-        };
-
-        wrap('exec');
-        wrap('execSync');
-        wrap('spawn');
-        wrap('spawnSync');
-        wrap('execFile');
-        wrap('execFileSync');
-    } catch { }
-
-    // ---------------------- require ----------------------
-    const originalRequire = module.constructor.prototype.require;
-    module.constructor.prototype.require = function (path) {
-        logger('require', path);
-        return originalRequire.call(this, path);
+    const o2 = vm.runInNewContext;
+    vm.runInNewContext = function (code, ...r) {
+      if (!STATE.disabled) safeLog('vm.runInNewContext', code);
+      return o2.call(vm, code, ...r);
     };
+  } catch {}
 
+  // ---------------------- child_process ----------------------
+  try {
+    const cp = require('child_process');
+    for (const k of ['exec','execSync','spawn','spawnSync','execFile','execFileSync']) {
+      if (!cp[k]) continue;
+      const o = cp[k];
+      cp[k] = function (...a) {
+        if (!STATE.disabled) safeLog(`child_process.${k}`, a[0]);
+        return o.apply(cp, a);
+      };
+    }
+  } catch {}
+
+  // ---------------------- require ----------------------
+  const oreq = module.constructor.prototype.require;
+  module.constructor.prototype.require = function (p) {
+    if (!STATE.disabled) safeLog('require', p);
+    return oreq.call(this, p);
+  };
 };
