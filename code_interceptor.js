@@ -3,89 +3,130 @@
 // logger(type, input)
 
 module.exports = function setupCodeInterceptor(logger = console.log) {
-  const STATE = { disabled: false };
+  const STATE_KEY = Symbol.for('simple-interceptor.code.state');
+  const g = globalThis;
 
-  function safeLog(type, input) {
-    const prev = STATE.disabled;
-    STATE.disabled = true;
+  if (!g[STATE_KEY]) {
+    g[STATE_KEY] = {
+      patched: false,
+      depth: 0,
+      loggers: new Set(),
+      originals: {
+        eval: g.eval,
+        Function: g.Function,
+        setTimeout: g.setTimeout,
+        setInterval: g.setInterval,
+      },
+    };
+  }
+
+  const S = g[STATE_KEY];
+  S.loggers.add(typeof logger === 'function' ? logger : console.log);
+
+  function runWithoutInterception(fn) {
+    S.depth++;
     try {
-      logger(type, input);
+      return fn();
     } finally {
-      STATE.disabled = prev;
+      S.depth--;
     }
   }
 
-  // ---------------------- eval ----------------------
-  const oeval = global.eval;
-  global.eval = function (input) {
-    if (!STATE.disabled) safeLog('eval', input);
-    return oeval(input);
-  };
-
-  // ---------------------- Function ----------------------
-  const OFunction = global.Function;
-  function InterceptedFunction(...args) {
-    if (!STATE.disabled) safeLog('Function', args[args.length - 1]);
-    return OFunction.apply(this, args);
+  function emit(type, input) {
+    runWithoutInterception(() => {
+      for (const lg of S.loggers) {
+        try {
+          lg(type, input);
+        } catch {
+          // swallow
+        }
+      }
+    });
   }
-  InterceptedFunction.prototype = OFunction.prototype;
-  OFunction.prototype.constructor = InterceptedFunction;
-  global.Function = InterceptedFunction;
 
-  // ---------------------- Timers ----------------------
-  const oST = global.setTimeout;
-  global.setTimeout = function (fn, delay, ...r) {
-    if (!STATE.disabled && typeof fn === 'string') safeLog('setTimeout', fn);
-    return oST(fn, delay, ...r);
-  };
+  if (!S.patched) {
+    S.patched = true;
 
-  const oSI = global.setInterval;
-  global.setInterval = function (fn, delay, ...r) {
-    if (!STATE.disabled && typeof fn === 'string') safeLog('setInterval', fn);
-    return oSI(fn, delay, ...r);
-  };
-
-  // ---------------------- vm ----------------------
-  try {
-    const vm = require('vm');
-
-    const o1 = vm.runInThisContext;
-    vm.runInThisContext = function (code, ...r) {
-      if (!STATE.disabled) safeLog('vm.runInThisContext', code);
-      return o1.call(vm, code, ...r);
+    // ---------------------- eval ----------------------
+    g.eval = function (input) {
+      if (S.depth === 0) emit('eval', input);
+      return S.originals.eval(input);
     };
 
-    const OS = vm.Script;
-    vm.Script = function (code, ...r) {
-      if (!STATE.disabled) safeLog('vm.Script', code);
-      return new OS(code, ...r);
-    };
-    vm.Script.prototype = OS.prototype;
+    // ---------------------- Function constructor ----------------------
+    const OriginalFunction = S.originals.Function;
 
-    const o2 = vm.runInNewContext;
-    vm.runInNewContext = function (code, ...r) {
-      if (!STATE.disabled) safeLog('vm.runInNewContext', code);
-      return o2.call(vm, code, ...r);
-    };
-  } catch {}
+    function InterceptedFunction(...args) {
+      const body = args[args.length - 1];
+      if (S.depth === 0) emit('Function', body);
+      return OriginalFunction.apply(this, args);
+    }
 
-  // ---------------------- child_process ----------------------
-  try {
-    const cp = require('child_process');
-    for (const k of ['exec','execSync','spawn','spawnSync','execFile','execFileSync']) {
-      if (!cp[k]) continue;
-      const o = cp[k];
-      cp[k] = function (...a) {
-        if (!STATE.disabled) safeLog(`child_process.${k}`, a[0]);
-        return o.apply(cp, a);
+    g.Function = InterceptedFunction;
+    InterceptedFunction.prototype = OriginalFunction.prototype;
+    OriginalFunction.prototype.constructor = InterceptedFunction;
+
+    // ---------------------- setTimeout / setInterval ----------------------
+    g.setTimeout = function (fn, delay, ...rest) {
+      if (S.depth === 0 && typeof fn === 'string') emit('setTimeout', fn);
+      return S.originals.setTimeout(fn, delay, ...rest);
+    };
+
+    g.setInterval = function (fn, delay, ...rest) {
+      if (S.depth === 0 && typeof fn === 'string') emit('setInterval', fn);
+      return S.originals.setInterval(fn, delay, ...rest);
+    };
+
+    // ---------------------- vm methods ----------------------
+    try {
+      const vm = require('vm');
+
+      const originalRunInThisContext = vm.runInThisContext;
+      vm.runInThisContext = function (code, ...rest) {
+        if (S.depth === 0) emit('vm.runInThisContext', code);
+        return originalRunInThisContext.call(vm, code, ...rest);
       };
-    }
-  } catch {}
 
-  // ---------------------- require ----------------------
-  const oreq = module.constructor.prototype.require;
-  module.constructor.prototype.require = function (p) {
-    if (!STATE.disabled) safeLog('require', p);
-    return oreq.call(this, p);
-  };
+      const OriginalScript = vm.Script;
+      vm.Script = function (code, ...rest) {
+        if (S.depth === 0) emit('vm.Script', code);
+        return new OriginalScript(code, ...rest);
+      };
+      vm.Script.prototype = OriginalScript.prototype;
+
+      const originalRunInNewContext = vm.runInNewContext;
+      vm.runInNewContext = function (code, ...rest) {
+        if (S.depth === 0) emit('vm.runInNewContext', code);
+        return originalRunInNewContext.call(vm, code, ...rest);
+      };
+    } catch {}
+
+    // ---------------------- child_process ----------------------
+    try {
+      const cp = require('child_process');
+
+      const wrap = (name) => {
+        const original = cp[name];
+        if (!original) return;
+        cp[name] = function (...args) {
+          if (S.depth === 0) emit(`child_process.${name}`, args[0]);
+          return original.apply(cp, args);
+        };
+      };
+
+      wrap('exec');
+      wrap('execSync');
+      wrap('spawn');
+      wrap('spawnSync');
+      wrap('execFile');
+      wrap('execFileSync');
+    } catch {}
+
+    // ---------------------- require ----------------------
+    const originalRequire = module.constructor.prototype.require;
+    module.constructor.prototype.require = function (path) {
+      if (S.depth === 0) emit('require', path);
+      return originalRequire.call(this, path);
+    };
+  }
 };
