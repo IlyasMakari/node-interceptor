@@ -1,6 +1,6 @@
 {
   "name": "simple-interceptor",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Intercept and log network requests and dynamic code execution for security research.",
   "homepage": "https://github.com/IlyasMakari/node-interceptor#readme",
   "bugs": {
