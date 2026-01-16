@@ -108,6 +108,10 @@ module.exports = function setupInterceptors(
   if (!S.patched) {
     S.patched = true;
 
+    /* =========================
+       HTTP / HTTPS
+    ========================== */
+
     http.request = function (...args) {
       if (S.depth > 0) return GLOBAL_ORIGINALS.httpRequest.apply(http, args);
 
@@ -164,6 +168,10 @@ module.exports = function setupInterceptors(
       return wrapRequest('https', GLOBAL_ORIGINALS.httpsGet.apply(https, args), requestInfo);
     };
 
+    /* =========================
+       FETCH
+    ========================== */
+
     if (typeof g.fetch === 'function') {
       g.fetch = async function (url, opts = {}) {
         if (S.depth > 0) return GLOBAL_ORIGINALS.fetch(url, opts);
@@ -191,6 +199,10 @@ module.exports = function setupInterceptors(
         return res;
       };
     }
+
+    /* =========================
+       AXIOS
+    ========================== */
 
     try {
       const axios = require('axios');
@@ -222,6 +234,56 @@ module.exports = function setupInterceptors(
           return response;
         });
       }
+    } catch {}
+
+    /* =========================
+       WEBSOCKET (ws)
+    ========================== */
+
+    try {
+      const WS = require('ws');
+
+      if (!GLOBAL_ORIGINALS.ws) {
+        GLOBAL_ORIGINALS.ws = WS;
+      }
+
+      function InterceptedWebSocket(url, protocols, options) {
+        const ws = new GLOBAL_ORIGINALS.ws(url, protocols, options);
+
+        // Intercept outgoing messages
+        const originalSend = ws.send;
+        ws.send = function (data, ...rest) {
+          if (S.depth === 0) {
+            emit('ws', {
+              transport: 'ws',
+              url,
+              direction: 'outgoing',
+              body: data?.toString?.() ?? data,
+            }, null);
+          }
+          return originalSend.call(ws, data, ...rest);
+        };
+
+        // Intercept incoming messages
+        ws.on('message', (data) => {
+          if (S.depth === 0) {
+            emit('ws', null, {
+              transport: 'ws',
+              url,
+              direction: 'incoming',
+              body: data?.toString?.() ?? data,
+            });
+          }
+        });
+
+        return ws;
+      }
+
+      // Preserve static properties
+      Object.assign(InterceptedWebSocket, GLOBAL_ORIGINALS.ws);
+
+      require.cache[require.resolve('ws')].exports = InterceptedWebSocket;
+
     } catch {}
   }
 };
